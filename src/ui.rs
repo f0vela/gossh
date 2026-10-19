@@ -4,6 +4,16 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wra
 
 use crate::app::{App, BackupKind, BackupStep, Mode};
 
+/// Rows the status bar needs: a long message wraps onto several lines, except
+/// during a session where the PTY size is derived from a fixed-height bar.
+fn status_height(app: &App, text: &str, width: u16) -> u16 {
+    if matches!(app.mode, Mode::Session) || width == 0 {
+        return 2;
+    }
+    let lines = text.chars().count().div_ceil(width as usize).clamp(1, 6) as u16;
+    lines + 1
+}
+
 /// Inner size available to the remote PTY given the whole terminal size.
 pub fn session_inner_size(term_cols: u16, term_rows: u16) -> (u16, u16) {
     let cols = term_cols.saturating_sub(38).saturating_sub(2).max(20);
@@ -13,9 +23,15 @@ pub fn session_inner_size(term_cols: u16, term_rows: u16) -> (u16, u16) {
 
 pub fn draw(app: &mut App, f: &mut Frame<'_>) {
     let root = f.area();
+    let status_text = if let Some(err) = &app.error {
+        format!("ERROR: {err}")
+    } else {
+        app.status.clone()
+    };
+    let status_rows = status_height(app, &status_text, root.width);
     let layout = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(2)])
+        .constraints([Constraint::Min(1), Constraint::Length(status_rows)])
         .split(root);
 
     let cols = Layout::default()
@@ -26,17 +42,13 @@ pub fn draw(app: &mut App, f: &mut Frame<'_>) {
     draw_profiles(app, f, cols[0]);
     draw_right_panel(app, f, cols[1]);
 
-    let status_text = if let Some(err) = &app.error {
-        format!("ERROR: {err}")
-    } else {
-        app.status.clone()
-    };
     let status = Paragraph::new(status_text)
         .style(if app.error.is_some() {
             Style::default().fg(Color::Red)
         } else {
             Style::default().fg(Color::Green)
         })
+        .wrap(Wrap { trim: false })
         .block(Block::default().borders(Borders::TOP));
     f.render_widget(status, layout[1]);
 }
@@ -100,6 +112,37 @@ fn draw_right_panel(app: &mut App, f: &mut Frame<'_>, area: Rect) {
             let inner = block.inner(area);
             f.render_widget(block, area);
             render_terminal(app, f, inner);
+        }
+        Mode::HostKey(prompt) => {
+            let info = &prompt.info;
+            let lines = vec![
+                Line::from(Span::styled(
+                    "No se puede verificar la autenticidad de este host.",
+                    Style::default().fg(Color::Yellow),
+                )),
+                Line::from(""),
+                Line::from(format!("Host:          {}:{}", info.host, info.port)),
+                Line::from(format!("Tipo de clave: {}", info.key_type)),
+                Line::from(format!("Huella:        {}", info.fingerprint)),
+                Line::from(""),
+                Line::from(
+                    "Compara la huella con la que te dio el administrador del servidor. \
+                     Si no coincide, un tercero podría estar interceptando la conexión \
+                     y robar tu contraseña.",
+                ),
+                Line::from(""),
+                Line::from("Escribe «yes» y Enter para confiar y guardarla en known_hosts."),
+                Line::from("Esc: cancelar (no se envía ninguna credencial)."),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("› ", Style::default().fg(Color::Magenta)),
+                    Span::raw(prompt.input.clone()),
+                ]),
+            ];
+            let p = Paragraph::new(lines)
+                .block(Block::default().title("Host desconocido").borders(Borders::ALL))
+                .wrap(Wrap { trim: false });
+            f.render_widget(p, area);
         }
         Mode::Form(form) => {
             let lines: Vec<Line> = form
@@ -202,7 +245,8 @@ fn render_terminal(app: &mut App, f: &mut Frame<'_>, area: Rect) {
     if rows != area.height || cols != area.width {
         app.parser.set_size(area.height.max(1), area.width.max(1));
     }
-    let (rows, cols) = app.parser.screen().size();
+    let screen = app.parser.screen();
+    let (rows, cols) = screen.size();
 
     let mut lines: Vec<Line> = Vec::with_capacity(rows as usize);
     for r in 0..rows {
@@ -210,24 +254,21 @@ fn render_terminal(app: &mut App, f: &mut Frame<'_>, area: Rect) {
         let mut run_style = Style::default();
         let mut run_text = String::new();
         for c in 0..cols {
-            let (text, style) = match app.parser.screen().cell(r, c) {
-                Some(cell) if cell.is_wide_continuation() => continue,
-                Some(cell) => {
-                    let t = cell.contents();
-                    (
-                        if t.is_empty() { " ".to_string() } else { t },
-                        cell_style(cell),
-                    )
-                }
-                None => (" ".to_string(), Style::default()),
-            };
+            let cell = screen.cell(r, c);
+            if cell.is_some_and(|c| c.is_wide_continuation()) {
+                continue;
+            }
+            let style = cell.map_or_else(Style::default, cell_style);
             if style != run_style {
                 if !run_text.is_empty() {
                     spans.push(Span::styled(std::mem::take(&mut run_text), run_style));
                 }
                 run_style = style;
             }
-            run_text.push_str(&text);
+            match cell {
+                Some(cell) if cell.has_contents() => run_text.push_str(&cell.contents()),
+                _ => run_text.push(' '),
+            }
         }
         if !run_text.is_empty() {
             spans.push(Span::styled(run_text, run_style));
@@ -236,7 +277,6 @@ fn render_terminal(app: &mut App, f: &mut Frame<'_>, area: Rect) {
     }
     f.render_widget(Paragraph::new(lines), area);
 
-    let screen = app.parser.screen();
     if !screen.hide_cursor() {
         let (cr, cc) = screen.cursor_position();
         if cc < area.width && cr < area.height {
@@ -380,5 +420,24 @@ mod tests {
         let s = render_to_string(&mut app, 100, 30);
         assert!(s.contains("Importar backup"), "falta el título:\n{s}");
         assert!(s.contains("/tmp/mi-backup.json"), "falta la ruta:\n{s}");
+    }
+
+    #[test]
+    fn renders_host_key_prompt_with_fingerprint() {
+        let store = temp_store();
+        let mut app = App::new(store, vec![]);
+        app.mode = Mode::HostKey(crate::app::HostKeyPrompt {
+            info: crate::ssh::HostKeyInfo {
+                host: "example.com".into(),
+                port: 22,
+                key_type: "ssh-ed25519".into(),
+                fingerprint: "SHA256:abcdef".into(),
+            },
+            input: String::new(),
+        });
+        let s = render_to_string(&mut app, 120, 30);
+        assert!(s.contains("Host desconocido"), "falta el título:\n{s}");
+        assert!(s.contains("SHA256:abcdef"), "falta la huella:\n{s}");
+        assert!(s.contains("ssh-ed25519"), "falta el tipo de clave:\n{s}");
     }
 }

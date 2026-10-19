@@ -25,9 +25,9 @@ App TUI en **Rust** para gestionar conexiones SSH desde terminal con almacenamie
 - Redimensionado del PTY remoto al cambiar el tamaño de la ventana.
 - Subida de archivos y lectura/escritura remota por SFTP.
 - Editor remoto integrado con `Ctrl+S` para guardar.
-- **Backup portátil de las conexiones**: exporta (`Ctrl+X`) todos los perfiles a un
+- **Backup portátil de las conexiones**: exporta (`Ctrl+Q x`) todos los perfiles a un
   único archivo **cifrado con contraseña** (Argon2id + AES-256-GCM), incluyendo las
-  contraseñas guardadas, e impórtalos (`Ctrl+R`) en otra máquina. Al importar, los
+  contraseñas guardadas, e impórtalos (`Ctrl+Q r`) en otra máquina. Al importar, los
   perfiles nuevos se añaden y los duplicados se omiten.
 
 ## Arquitectura
@@ -138,6 +138,8 @@ En editor remoto:
 - **Verificación de host key** contra `~/.ssh/known_hosts`:
   - Si coincide, conecta.
   - Si **cambió**, aborta la conexión con aviso de posible ataque MITM.
-  - Si es un host nuevo, aplica *trust-on-first-use* y añade la huella a
-    `~/.ssh/known_hosts` (sin reescribir el archivo completo).
-- Si el keychain y el archivo cifrado quedan desincronizados (por ejemplo, borras la clave del keychain), la app respalda el archivo ilegible como `profiles.enc.unreadable.<timestamp>.bak` y arranca con perfiles vacíos.
+  - Si es un host nuevo, muestra su **huella SHA256** y pide escribir `yes` para
+    confiar; solo entonces se añade a `~/.ssh/known_hosts` (sin reescribir el
+    archivo). Antes de esa confirmación no se envía ninguna credencial.
+- Si el keychain y el archivo cifrado quedan desincronizados (por ejemplo, borras la clave del keychain), la app respalda el archivo ilegible como `profiles.enc.unreadable.<timestamp>.bak`, arranca con perfiles vacíos y **muestra un aviso** con la ruta del respaldo.
+- La contraseña de un backup debe tener **al menos 12 caracteres**; Argon2id usa 64 MiB y 3 pasadas (los backups antiguos siguen pudiéndose importar).

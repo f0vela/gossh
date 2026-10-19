@@ -11,7 +11,6 @@ base64 = "0.22"
 crossterm = "0.28"
 dirs = "5.0"
 keyring = "2.3"
-libc = "0.2"
 rand = "0.8"
 ratatui = "0.29"
 serde = { version = "1.0", features = ["derive"] }
@@ -19,3 +18,21 @@ serde_json = "1.0"
 ssh2 = "0.9"
 tui-textarea = "0.7"
 vt100 = "0.15"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+
+# Crypto crates are painfully slow unoptimized (Argon2 made `cargo test` take minutes).
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3

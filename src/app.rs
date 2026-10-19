@@ -13,7 +13,7 @@ use crossterm::{execute, ExecutableCommand};
 use ratatui::prelude::*;
 use tui_textarea::{Input, Key, TextArea};
 
-use crate::ssh::{debug_log, spawn_ssh_worker, SshEvent, SshRequest};
+use crate::ssh::{debug_log, spawn_ssh_worker, HostKeyInfo, SshEvent, SshRequest};
 use crate::store::{AuthMethod, ConnectionProfile, SecureStore};
 use crate::ui;
 
@@ -225,8 +225,15 @@ pub(crate) struct BackupState {
     pub(crate) error: Option<String>,
 }
 
+/// Pending trust-on-first-use decision for an unknown host key.
+pub(crate) struct HostKeyPrompt {
+    pub(crate) info: HostKeyInfo,
+    pub(crate) input: String,
+}
+
 pub(crate) enum Mode {
     List,
+    HostKey(HostKeyPrompt),
     Form(ProfileForm),
     Session,
     Prompt(PromptState),
@@ -314,11 +321,21 @@ impl App {
         &mut self,
         terminal: &mut Terminal<ratatui::backend::CrosstermBackend<io::Stdout>>,
     ) -> Result<()> {
+        let mut dirty = true;
         while !self.should_quit {
-            self.drain_ssh_events();
-            self.expire_prefix();
-            terminal.draw(|f| ui::draw(self, f))?;
-            if event::poll(Duration::from_millis(50))? {
+            dirty |= self.drain_ssh_events();
+            dirty |= self.expire_prefix();
+            // The spinner animates while connecting; otherwise only repaint when
+            // something changed, instead of rebuilding the frame every 50 ms.
+            if dirty || self.connecting {
+                terminal.draw(|f| ui::draw(self, f))?;
+                dirty = false;
+            }
+            let mut wait = Duration::from_millis(50);
+            // Drain every queued input event before repainting so a paste or key
+            // repeat does not render once per key.
+            while event::poll(wait)? {
+                dirty = true;
                 match event::read()? {
                     Event::Key(key) => {
                         if key.kind != KeyEventKind::Release {
@@ -328,6 +345,10 @@ impl App {
                     Event::Resize(w, h) => self.handle_resize(w, h),
                     _ => {}
                 }
+                if self.should_quit {
+                    break;
+                }
+                wait = Duration::ZERO;
             }
             self.tick = self.tick.wrapping_add(1);
         }
@@ -344,10 +365,14 @@ impl App {
         }
     }
 
-    fn drain_ssh_events(&mut self) {
+    /// Applies every queued worker event; returns whether any was received.
+    fn drain_ssh_events(&mut self) -> bool {
+        let mut any = false;
         while let Ok(ev) = self.ssh_rx.try_recv() {
             self.apply_ssh_event(ev);
+            any = true;
         }
+        any
     }
 
     fn apply_ssh_event(&mut self, ev: SshEvent) {
@@ -364,6 +389,14 @@ impl App {
                 let _ = self.ssh_tx.send(SshRequest::Resize(cols, rows));
                 self.mode = Mode::Session;
                 self.status = format!("Conectado · home {home} · {SESSION_HELP}");
+            }
+            SshEvent::ConfirmHostKey(info) => {
+                self.prefix = false;
+                self.status = "Host desconocido: verifica la huella antes de continuar".to_string();
+                self.mode = Mode::HostKey(HostKeyPrompt {
+                    info,
+                    input: String::new(),
+                });
             }
             SshEvent::ConnectFailed(msg) => {
                 self.mode = Mode::List;
@@ -425,6 +458,7 @@ impl App {
         match &mut self.mode {
             Mode::List => self.handle_list_keys(key),
             Mode::Session => self.handle_session_keys(key),
+            Mode::HostKey(_) => self.handle_host_key_keys(key),
             Mode::Form(_) => self.handle_form_keys(key),
             Mode::Prompt(_) => self.handle_prompt_keys(key),
             Mode::FileEdit => self.handle_file_edit_keys(key),
@@ -590,6 +624,12 @@ impl App {
         }
     }
 
+    /// Shows an important message from startup (long enough to read a path).
+    pub fn set_startup_notice(&mut self, message: String) {
+        self.error = Some(message);
+        self.error_until = Some(Instant::now() + Duration::from_secs(45));
+    }
+
     /// Shows an error and guarantees it stays visible for a minimum time.
     fn set_error(&mut self, message: impl Into<String>) {
         self.error = Some(message.into());
@@ -613,11 +653,14 @@ impl App {
         self.status = format!("PREFIJO activo · {help}");
     }
 
-    fn expire_prefix(&mut self) {
+    /// Disarms a stale prefix; returns whether the screen needs a repaint.
+    fn expire_prefix(&mut self) -> bool {
         if self.prefix && self.prefix_at.elapsed() > PREFIX_TIMEOUT {
             self.prefix = false;
             self.status = self.default_status().to_string();
+            return true;
         }
+        false
     }
 
     fn default_status(&self) -> &'static str {
@@ -634,6 +677,29 @@ impl App {
         self.prefix = false;
         self.mode = Mode::List;
         self.status = "desconectado".to_string();
+    }
+
+    /// Only an explicit `yes` trusts the host; anything else (Esc, Ctrl+C, a
+    /// different answer) rejects it, so a stray Enter can never accept a key.
+    fn handle_host_key_keys(&mut self, key: KeyEvent) {
+        let Mode::HostKey(prompt) = &mut self.mode else {
+            return;
+        };
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let reject = key.code == KeyCode::Esc || (ctrl && key.code == KeyCode::Char('c'));
+        if !reject && key.code != KeyCode::Enter {
+            edit_line_tail(&mut prompt.input, key);
+            return;
+        }
+        let accept = !reject && prompt.input.trim().eq_ignore_ascii_case("yes");
+        debug_log(&format!("app: host key {}", if accept { "aceptada" } else { "rechazada" }));
+        self.mode = Mode::Session;
+        self.status = if accept {
+            "Host key aceptada · autenticando...".to_string()
+        } else {
+            "Host key rechazada · cancelando conexión...".to_string()
+        };
+        let _ = self.ssh_tx.send(SshRequest::HostKeyDecision(accept));
     }
 
     fn handle_form_keys(&mut self, key: KeyEvent) {
@@ -658,16 +724,14 @@ impl App {
                         self.selected = self.profiles.len().saturating_sub(1);
                     }
                     if let Err(e) = self.store.save_profiles(&self.profiles) {
-                        self.error = Some(e.to_string());
-                        self.error_until = Some(Instant::now() + ERROR_MIN_DISPLAY);
+                        self.set_error(e.to_string());
                     } else {
                         self.mode = Mode::List;
                         self.status = "perfil guardado".to_string();
                     }
                 }
                 Err(e) => {
-                    self.error = Some(e.to_string());
-                    self.error_until = Some(Instant::now() + ERROR_MIN_DISPLAY);
+                    self.set_error(e.to_string());
                 }
             },
             _ => {
@@ -694,8 +758,7 @@ impl App {
                 PromptKind::Upload => {
                     let parts: Vec<&str> = input.split_whitespace().collect();
                     if parts.len() != 2 {
-                        self.error = Some("usa: local_path remote_path".to_string());
-                        self.error_until = Some(Instant::now() + ERROR_MIN_DISPLAY);
+                        self.set_error("usa: local_path remote_path");
                         return;
                     }
                     self.status = "subiendo archivo...".to_string();
@@ -706,8 +769,7 @@ impl App {
                 }
                 PromptKind::OpenRemote => {
                     if input.is_empty() {
-                        self.error = Some("ruta requerida".to_string());
-                        self.error_until = Some(Instant::now() + ERROR_MIN_DISPLAY);
+                        self.set_error("ruta requerida");
                         return;
                     }
                     self.status = "leyendo archivo remoto...".to_string();
@@ -826,6 +888,16 @@ impl App {
                 }
                 match kind {
                     BackupKind::Export => {
+                        if input.chars().count() < crate::store::MIN_BACKUP_PASSPHRASE_CHARS {
+                            self.set_backup_error(&format!(
+                                "usa al menos {} caracteres (protege todas tus contraseñas)",
+                                crate::store::MIN_BACKUP_PASSPHRASE_CHARS
+                            ));
+                            if let Mode::Backup(state) = &mut self.mode {
+                                state.input.clear();
+                            }
+                            return;
+                        }
                         if let Mode::Backup(state) = &mut self.mode {
                             state.pass = input;
                             state.step = BackupStep::Confirm;
@@ -861,9 +933,8 @@ impl App {
     fn finish_export(&mut self, path: &str, pass: &str) {
         let resolved = expand_path(path);
         match crate::store::export_backup(&self.profiles, pass) {
-            Ok(json) => match fs::write(&resolved, json) {
+            Ok(json) => match crate::store::write_private(Path::new(&resolved), json.as_bytes()) {
                 Ok(()) => {
-                    let _ = crate::store::set_private_file_permissions(Path::new(&resolved));
                     self.mode = Mode::List;
                     self.status = format!(
                         "backup exportado ({} perfiles) → {resolved}",
@@ -872,7 +943,7 @@ impl App {
                 }
                 Err(e) => {
                     self.mode = Mode::List;
-                    self.set_error(format!("escribiendo backup: {e}"));
+                    self.set_error(format!("escribiendo backup: {e:#}"));
                 }
             },
             Err(e) => {
@@ -962,6 +1033,7 @@ fn is_prefix_key(key: &KeyEvent) -> bool {
 fn ssh_event_name(ev: &SshEvent) -> &'static str {
     match ev {
         SshEvent::Connected { .. } => "Connected",
+        SshEvent::ConfirmHostKey(_) => "ConfirmHostKey",
         SshEvent::ConnectFailed(_) => "ConnectFailed",
         SshEvent::Output(_) => "Output",
         SshEvent::ShellClosed => "ShellClosed",
@@ -1197,9 +1269,9 @@ mod tests {
         assert!(matches!(app.mode, Mode::Backup(_)));
         set_backup_path(&mut app, &out_str);
         press(&mut app, KeyCode::Enter); // accept path -> ask password
-        type_text(&mut app, "pw123");
+        type_text(&mut app, "pw123-long-enough");
         press(&mut app, KeyCode::Enter); // -> confirm
-        type_text(&mut app, "pw123");
+        type_text(&mut app, "pw123-long-enough");
         press(&mut app, KeyCode::Enter); // write file
 
         assert!(matches!(app.mode, Mode::List), "debería volver a la lista");
@@ -1218,9 +1290,9 @@ mod tests {
         prefix_cmd(&mut app, 'x');
         set_backup_path(&mut app, "/tmp/does-not-matter.json");
         press(&mut app, KeyCode::Enter);
-        type_text(&mut app, "aaa");
+        type_text(&mut app, "aaaaaaaaaaaaaaaa");
         press(&mut app, KeyCode::Enter);
-        type_text(&mut app, "bbb");
+        type_text(&mut app, "bbbbbbbbbbbbbbbb");
         press(&mut app, KeyCode::Enter);
 
         // Still in the confirm step, showing an error, no file written.
@@ -1251,7 +1323,7 @@ mod tests {
         }];
         std::fs::write(
             &file,
-            crate::store::export_backup(&profiles, "correct").unwrap(),
+            crate::store::export_backup(&profiles, "correct-passphrase").unwrap(),
         )
         .unwrap();
 
@@ -1262,7 +1334,7 @@ mod tests {
         prefix_cmd(&mut app, 'r');
         set_backup_path(&mut app, &file_str);
         press(&mut app, KeyCode::Enter);
-        type_text(&mut app, "wrong");
+        type_text(&mut app, "wrong-passphrase");
         press(&mut app, KeyCode::Enter);
 
         match &app.mode {
@@ -1295,7 +1367,7 @@ mod tests {
         }];
         std::fs::write(
             &file,
-            crate::store::export_backup(&profiles, "correct").unwrap(),
+            crate::store::export_backup(&profiles, "correct-passphrase").unwrap(),
         )
         .unwrap();
 
@@ -1305,7 +1377,7 @@ mod tests {
         prefix_cmd(&mut app, 'r');
         set_backup_path(&mut app, &file_str);
         press(&mut app, KeyCode::Enter);
-        type_text(&mut app, "correct");
+        type_text(&mut app, "correct-passphrase");
         press(&mut app, KeyCode::Enter);
 
         assert_eq!(app.profiles.len(), 1);
@@ -1313,6 +1385,71 @@ mod tests {
         assert_eq!(app.profiles[0].host, "example.com");
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn host_key_info() -> HostKeyInfo {
+        HostKeyInfo {
+            host: "example.com".into(),
+            port: 22,
+            key_type: "ssh-ed25519".into(),
+            fingerprint: "SHA256:abc".into(),
+        }
+    }
+
+    #[test]
+    fn unknown_host_key_opens_the_confirmation_prompt() {
+        let mut app = App::new(temp_store("hk_open"), vec![]);
+        app.connecting = true;
+        app.mode = Mode::Session;
+        app.apply_ssh_event(SshEvent::ConfirmHostKey(host_key_info()));
+        assert!(matches!(app.mode, Mode::HostKey(_)));
+    }
+
+    #[test]
+    fn host_key_needs_an_explicit_yes() {
+        // Enter alone must not trust the key: it is only prompted, never defaulted.
+        for (answer, expect_accept) in [("", false), ("y", false), ("no", false), ("yes", true)] {
+            let mut app = App::new(temp_store("hk_answer"), vec![]);
+            app.connecting = true;
+            app.mode = Mode::Session;
+            app.apply_ssh_event(SshEvent::ConfirmHostKey(host_key_info()));
+            type_text(&mut app, answer);
+            press(&mut app, KeyCode::Enter);
+            assert!(matches!(app.mode, Mode::Session));
+            assert_eq!(
+                app.status.starts_with("Host key aceptada"),
+                expect_accept,
+                "respuesta {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn esc_rejects_the_host_key_even_after_typing_yes() {
+        let mut app = App::new(temp_store("hk_esc"), vec![]);
+        app.connecting = true;
+        app.mode = Mode::Session;
+        app.apply_ssh_event(SshEvent::ConfirmHostKey(host_key_info()));
+        type_text(&mut app, "yes");
+        press(&mut app, KeyCode::Esc);
+        assert!(app.status.starts_with("Host key rechazada"));
+    }
+
+    #[test]
+    fn backup_export_rejects_short_passphrase() {
+        let mut app = App::new(temp_store("shortpw"), vec![]);
+        prefix_cmd(&mut app, 'x');
+        set_backup_path(&mut app, "/tmp/does-not-matter.json");
+        press(&mut app, KeyCode::Enter);
+        type_text(&mut app, "corta");
+        press(&mut app, KeyCode::Enter);
+        match &app.mode {
+            Mode::Backup(state) => {
+                assert!(state.error.is_some());
+                assert_eq!(state.step, BackupStep::Pass);
+            }
+            _ => panic!("debería seguir en el paso de contraseña"),
+        }
     }
 
     #[test]

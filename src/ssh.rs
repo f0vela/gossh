@@ -29,10 +29,30 @@ pub(crate) fn debug_log(msg: &str) {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis())
         .unwrap_or(0);
-    if let Ok(mut f) = fs::OpenOptions::new().create(true).append(true).open(&path) {
+    let mut opts = fs::OpenOptions::new();
+    opts.create(true).append(true);
+    #[cfg(unix)]
+    {
+        // The log names hosts and users: keep it owner-only.
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(&path) {
         let _ = writeln!(f, "{ts} {msg}");
     }
 }
+
+/// An unknown host key awaiting the user's trust decision.
+#[derive(Debug, Clone)]
+pub struct HostKeyInfo {
+    pub host: String,
+    pub port: u16,
+    pub key_type: String,
+    pub fingerprint: String,
+}
+
+/// Asks the user whether to trust an unknown host key; `true` accepts it.
+pub type HostKeyConfirm<'a> = &'a mut dyn FnMut(HostKeyInfo) -> bool;
 
 /// Result of a non-blocking read from the interactive shell channel.
 enum ShellPoll {
@@ -61,7 +81,12 @@ const MAX_PENDING_INPUT: usize = 64 * 1024;
 impl SSHClient {
     /// Connects, authenticates, verifies the host key, initializes SFTP and
     /// opens an interactive PTY shell sized `cols` x `rows`.
-    pub fn connect(profile: &ConnectionProfile, cols: u16, rows: u16) -> Result<Self> {
+    pub fn connect(
+        profile: &ConnectionProfile,
+        cols: u16,
+        rows: u16,
+        confirm: HostKeyConfirm<'_>,
+    ) -> Result<Self> {
         let tcp = TcpStream::connect(format!("{}:{}", profile.host, profile.port))
             .with_context(|| format!("conectando a {}:{}", profile.host, profile.port))?;
         tcp.set_read_timeout(Some(Duration::from_secs(20))).ok();
@@ -74,7 +99,7 @@ impl SSHClient {
         session.set_tcp_stream(tcp);
         session.handshake().context("handshake SSH")?;
 
-        verify_host_key(&session, profile)?;
+        verify_host_key(&session, profile, confirm)?;
         authenticate(&session, profile)?;
 
         if !session.authenticated() {
@@ -475,8 +500,13 @@ fn known_hosts_path() -> Result<PathBuf> {
 ///
 /// - Match: connection is trusted.
 /// - Mismatch: hard failure (possible MITM, or the server was reinstalled).
-/// - NotFound: trust-on-first-use; the key is appended to known_hosts.
-fn verify_host_key(session: &Session, profile: &ConnectionProfile) -> Result<()> {
+/// - NotFound: the user must confirm the fingerprint; only then is the key
+///   appended to known_hosts. Nothing is sent to the server before that.
+fn verify_host_key(
+    session: &Session,
+    profile: &ConnectionProfile,
+    confirm: HostKeyConfirm<'_>,
+) -> Result<()> {
     let Some((key, key_type)) = session.host_key() else {
         bail!("el servidor no entregó una host key; conexión abortada");
     };
@@ -484,7 +514,11 @@ fn verify_host_key(session: &Session, profile: &ConnectionProfile) -> Result<()>
     let path = known_hosts_path()?;
     let mut known_hosts = session.known_hosts().context("inicializando known_hosts")?;
     if path.exists() {
-        // Ignore parse errors from unrelated/legacy lines.
+        // An unreadable file must not silently turn every host into "unknown".
+        fs::File::open(&path)
+            .with_context(|| format!("no se pudo leer {}; conexión abortada", path.display()))?;
+        // Parse errors from unrelated/legacy lines are ignored: hosts that fail
+        // to load simply show up as unknown and go through the confirmation.
         let _ = known_hosts.read_file(&path, KnownHostFileKind::OpenSSH);
     }
 
@@ -511,6 +545,19 @@ fn verify_host_key(session: &Session, profile: &ConnectionProfile) -> Result<()>
                 bail!(
                     "tipo de host key desconocido para {}; se rechaza por seguridad",
                     profile.host
+                );
+            }
+            let info = HostKeyInfo {
+                host: profile.host.clone(),
+                port: profile.port,
+                key_type: host_key_type_name(key_type).to_string(),
+                fingerprint: sha256_fingerprint(session).unwrap_or_else(|| "(no disponible)".into()),
+            };
+            if !confirm(info) {
+                bail!(
+                    "host key de {}:{} no aceptada; conexión cancelada",
+                    profile.host,
+                    profile.port
                 );
             }
             let line = format!(
@@ -588,12 +635,16 @@ pub enum SshRequest {
         path: String,
         content: String,
     },
+    /// Answer to `SshEvent::ConfirmHostKey`.
+    HostKeyDecision(bool),
     Disconnect,
     Shutdown,
 }
 
 /// Event sent from the SSH worker thread back to the UI thread.
 pub enum SshEvent {
+    /// Unknown host key: the worker is blocked until `HostKeyDecision` arrives.
+    ConfirmHostKey(HostKeyInfo),
     Connected { home: String },
     ConnectFailed(String),
     Output(Vec<u8>),
@@ -628,22 +679,43 @@ pub fn spawn_ssh_worker(rx: Receiver<SshRequest>, tx: Sender<SshEvent>) -> JoinH
                         profile,
                         cols,
                         rows,
-                    }) => match SSHClient::connect(&profile, cols, rows) {
-                        Ok(c) => {
-                            let home = c.home().to_string();
-                            debug_log(&format!(
-                                "worker: conectado a {}@{}:{} (home {home})",
-                                profile.user, profile.host, profile.port
-                            ));
-                            let _ = tx.send(SshEvent::Connected { home });
-                            client = Some(c);
-                            pending.clear();
+                    }) => {
+                        let mut shutdown = false;
+                        let mut confirm = |info: HostKeyInfo| {
+                            let _ = tx.send(SshEvent::ConfirmHostKey(info));
+                            // Block until the user decides; other requests make no
+                            // sense while connecting and are dropped.
+                            loop {
+                                match rx.recv() {
+                                    Ok(SshRequest::HostKeyDecision(ok)) => return ok,
+                                    Ok(SshRequest::Shutdown) | Err(_) => {
+                                        shutdown = true;
+                                        return false;
+                                    }
+                                    Ok(_) => {}
+                                }
+                            }
+                        };
+                        match SSHClient::connect(&profile, cols, rows, &mut confirm) {
+                            Ok(c) => {
+                                let home = c.home().to_string();
+                                debug_log(&format!(
+                                    "worker: conectado a {}@{}:{} (home {home})",
+                                    profile.user, profile.host, profile.port
+                                ));
+                                let _ = tx.send(SshEvent::Connected { home });
+                                client = Some(c);
+                                pending.clear();
+                            }
+                            Err(e) => {
+                                debug_log(&format!("worker: falló conexión: {e:#}"));
+                                let _ = tx.send(SshEvent::ConnectFailed(format!("{e:#}")));
+                            }
                         }
-                        Err(e) => {
-                            debug_log(&format!("worker: falló conexión: {e:#}"));
-                            let _ = tx.send(SshEvent::ConnectFailed(format!("{e:#}")));
+                        if shutdown {
+                            quit = true;
                         }
-                    },
+                    }
                     Ok(SshRequest::Shutdown) | Err(_) => quit = true,
                     Ok(_) => {}
                 }
@@ -728,7 +800,7 @@ pub fn spawn_ssh_worker(rx: Receiver<SshRequest>, tx: Sender<SshEvent>) -> JoinH
                         drop_client = true;
                         break;
                     }
-                    Ok(SshRequest::Connect { .. }) => {}
+                    Ok(SshRequest::Connect { .. }) | Ok(SshRequest::HostKeyDecision(_)) => {}
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         quit = true;
