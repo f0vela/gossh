@@ -143,3 +143,11 @@ En editor remoto:
     archivo). Antes de esa confirmación no se envía ninguna credencial.
 - Si el keychain y el archivo cifrado quedan desincronizados (por ejemplo, borras la clave del keychain), la app respalda el archivo ilegible como `profiles.enc.unreadable.<timestamp>.bak`, arranca con perfiles vacíos y **muestra un aviso** con la ruta del respaldo.
 - La contraseña de un backup debe tener **al menos 12 caracteres**; Argon2id usa 64 MiB y 3 pasadas (los backups antiguos siguen pudiéndose importar).
+
+## Versión Go (macOS)
+
+En [`goapp/`](goapp/) hay un port a Go como app de escritorio nativa (MyGo +
+libghostty-vt), con barra lateral, terminal SSH embebida, Touch ID y el mismo
+formato de `profiles.enc` y de backups que esta versión. Ver
+[`goapp/README.md`](goapp/README.md) y
+[`goapp/docs/DOCUMENTACION_TECNICA.md`](goapp/docs/DOCUMENTACION_TECNICA.md).
