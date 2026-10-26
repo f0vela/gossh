@@ -1,4 +1,4 @@
-module tuissh-go
+module gossh-go
 
 go 1.27.2
 

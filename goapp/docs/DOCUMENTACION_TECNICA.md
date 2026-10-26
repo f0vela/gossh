@@ -1,6 +1,6 @@
-# tuissh-go — Documentación técnica
+# gossh-go — Documentación técnica
 
-Versión Go (macOS) de tuissh, hecha con MyGo. Complementa a
+Versión Go (macOS) de gossh, hecha con MyGo. Complementa a
 [`../README.md`](../README.md). El formato de datos (perfiles cifrados y
 backups) es **idéntico al de la versión Rust**: ambas apps comparten
 `profiles.enc` y los backups son intercambiables.
@@ -79,7 +79,7 @@ hay sesión.
 
 ### 3.5 Menús
 
-`menu()` construye la barra de menús: **tuissh** (Acerca de, Ajustes… ⌘,,
+`menu()` construye la barra de menús: **gossh** (Acerca de, Ajustes… ⌘,,
 mostrar/ocultar barra ⌘⌃S, Bloquear ⌘L, Servicios, Ocultar, Salir),
 Archivo, Edición, **Conexiones** (una entrada por perfil, ⌘1…⌘9), Ver,
 Ventana. `refreshMenu()` lo reconstruye tras cada cambio de la lista y al
@@ -148,16 +148,16 @@ autenticación falla con un error claro.
 | `UploadFile` | Streaming con `io.Copy`; crea el directorio padre. |
 | `Exists` | `Stat` de la ruta resuelta; la UI pide confirmar antes de sobrescribir. |
 | `ReadRemoteFile` | Tope `MaxEditableSize` (2 MiB); rechaza contenido no UTF-8 (editarlo lo corrompería). |
-| `WriteRemoteFile` | Escribe un temporal `*.tuissh-tmp`, `Chmod` al modo original y `PosixRename` sobre el destino (fallback: borrar + renombrar, conservando el temporal si falla). Sigue symlinks (`RealPath`). Una caída a mitad nunca deja el archivo truncado. |
+| `WriteRemoteFile` | Escribe un temporal `*.gossh-tmp`, `Chmod` al modo original y `PosixRename` sobre el destino (fallback: borrar + renombrar, conservando el temporal si falla). Sigue symlinks (`RealPath`). Una caída a mitad nunca deja el archivo truncado. |
 
 ## 5. Almacén y llavero (`internal/store`)
 
-- `profiles.enc` (0600) en `~/Library/Application Support/tuissh/`:
+- `profiles.enc` (0600) en `~/Library/Application Support/gossh/`:
   `nonce(12) ‖ AES-256-GCM(JSON de perfiles)`. Escritura atómica
   (temporal + `rename`).
 - Si no se puede descifrar, el archivo se **mueve** a
   `profiles.enc.unreadable.<ts>.bak` (nunca se borra) y se avisa.
-- **Clave maestra**: 32 bytes, base64, en el llavero (servicio `tuissh`, cuenta
+- **Clave maestra**: 32 bytes, base64, en el llavero (servicio `gossh`, cuenta
   `data-key`) mediante `mygo.Secrets` (API nativa). Reglas:
   - Solo se genera una clave nueva si el ítem **no existe**
     (`ErrSecretNotFound` o exit 44 del CLI). Cualquier otro error se devuelve.
@@ -172,7 +172,7 @@ autenticación falla con un error claro.
 
 ### 5.1 Backups
 
-Envelope JSON `tuissh-backup` v2 (v1 legado): `kdf=argon2id`, `salt`,
+Envelope JSON `gossh-backup` v2 (v1 legado): `kdf=argon2id`, `salt`,
 `m_cost/t_cost/p_cost`, `data` (AES-256-GCM). Nuevos: 64 MiB, 3 pasadas.
 Contraseña ≥ 12 caracteres; al importar los costes se acotan
 (`maxKDF*`) y la UI rechaza archivos > 16 MiB (`MaxBackupFileSize`). La
@@ -230,7 +230,7 @@ puente Objective-C (`objc.NewBlock` para el `reply:`). Política
 | Paquete | Qué cubre |
 |---|---|
 | `store` | Roundtrip de cifrado; backups (roundtrip, contraseña incorrecta o corta, sobre v1 legado, costes KDF fuera de rango); escritura 0600; fusión sin duplicados. |
-| `store` (`TUISSH_KEYCHAIN_TEST=1`) | Migración de un ítem legado del llavero con un servicio temporal. |
+| `store` (`GOSSH_KEYCHAIN_TEST=1`) | Migración de un ítem legado del llavero con un servicio temporal. |
 | `sshx` | `known_hosts` ausente → pregunta y persiste (0600); llave cambiada → rechazo sin preguntar; llave rechazada → no se escribe; algoritmos conocidos (claro/hasheado/puerto); enrutado de preguntas keyboard-interactive. |
 | `settings` | Roundtrip, permisos 0600, archivo corrupto = error. |
 | `biometric` | La respuesta del bloque llega desde el hilo del sistema y la cancelación se mapea (sin intervención humana); disponibilidad sin pánico. |
@@ -248,7 +248,7 @@ go test ./...
 
 `./build/dmg.sh` → `go tool mygo build`: compila, firma **ad-hoc** el `.app`
 (con `libghostty-vt.dylib` en `Contents/Resources`) y crea
-`tuissh <versión> arm64.dmg`. La versión y `minimumSystemVersion` (13.0) están
+`gossh <versión> arm64.dmg`. La versión y `minimumSystemVersion` (13.0) están
 en `mygo.json`. Sin Developer ID: primera apertura con clic derecho → Abrir.
 
 La firma ad-hoc tiene un designated requirement basado en `cdhash`, que cambia

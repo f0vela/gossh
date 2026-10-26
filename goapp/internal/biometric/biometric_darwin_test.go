@@ -20,7 +20,7 @@ func TestEvaluateReplyArrivesAndMapsCancel(t *testing.T) {
 	defer ctx.Send(selRelease)
 	out := make(chan error, 1)
 	go func() {
-		out <- evaluate(ctx, "test de tuissh", func() {
+		out <- evaluate(ctx, "test de gossh", func() {
 			time.Sleep(300 * time.Millisecond)
 			ctx.Send(selInval)
 		})

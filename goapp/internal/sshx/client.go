@@ -17,7 +17,7 @@ import (
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
 
-	"tuissh-go/internal/store"
+	"gossh-go/internal/store"
 )
 
 // HostKeyInfo describes an unknown host key awaiting a trust decision.
@@ -211,7 +211,7 @@ func (c *Client) WriteRemoteFile(remote, content string) error {
 	if err := c.ensureRemoteParent(rp); err != nil {
 		return err
 	}
-	tmp := rp + ".tuissh-tmp"
+	tmp := rp + ".gossh-tmp"
 	f, err := c.sftp.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC)
 	if err != nil {
 		return fmt.Errorf("creando remoto %s: %w", remote, err)

@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 
-	"tuissh-go/internal/ui"
+	"gossh-go/internal/ui"
 )
 
 func main() {
 	if err := ui.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "tuissh:", err)
+		fmt.Fprintln(os.Stderr, "gossh:", err)
 		os.Exit(1)
 	}
 }

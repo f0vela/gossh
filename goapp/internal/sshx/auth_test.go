@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"tuissh-go/internal/store"
+	"gossh-go/internal/store"
 )
 
 func testKey(t *testing.T) ssh.PublicKey {

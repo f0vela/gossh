@@ -1,6 +1,6 @@
-# tuissh-go
+# gossh-go
 
-Port a Go de la app tuissh (Rust TUI). App de escritorio nativa para macOS
+Port a Go de la app tuissh (Rust TUI), ahora gossh. App de escritorio nativa para macOS
 hecha con [MyGo](https://mygo.egoist.dev): barra lateral con las conexiones y,
 en una tarjeta redondeada, la terminal SSH embebida, emulada con
 **libghostty-vt** (la librería de terminal de Ghostty, vía `plugins/terminal`).
@@ -14,7 +14,7 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
 - **Terminal**: `github.com/egoist/mygo/plugins/terminal` — emulación VT con
   libghostty-vt, scrollback, selección, copy/paste, zoom.
 - **SSH/SFTP**: `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`.
-- **Keychain**: API nativa de macOS vía `mygo.Secrets` (servicio `tuissh`,
+- **Keychain**: API nativa de macOS vía `mygo.Secrets` (servicio `gossh`,
   cuenta `data-key`, **el mismo que usa la app Rust** → comparte
   `profiles.enc`). La clave que dejó la app Rust se lee una vez con el CLI
   `security` y se migra (ver [Seguridad](#seguridad)).
@@ -37,10 +37,10 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
 - SFTP: subir archivo (pide confirmación si va a sobrescribir), abrir/editar/
   guardar archivo remoto (límite 2 MiB, solo UTF-8, guardado atómico).
 - Backup export/import cifrado con contraseña (Argon2id 64 MiB/3 pasadas +
-  AES-256-GCM), **formato idéntico al Rust** (`tuissh-backup` v1/v2): los
+  AES-256-GCM), **formato idéntico al Rust** (`gossh-backup` v1/v2): los
   backups exportados por la TUI se importan aquí directamente.
 - Almacén cifrado `profiles.enc` en
-  `~/Library/Application Support/tuissh/` (0600).
+  `~/Library/Application Support/gossh/` (0600).
 
 ## Interfaz
 
@@ -64,7 +64,7 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
 
 | Atajo | Acción |
 |---|---|
-| ⌘, | Ajustes (menú **tuissh → Ajustes…**) |
+| ⌘, | Ajustes (menú **gossh → Ajustes…**) |
 | ⌘L | Bloquear la app (si «Bloquear al abrir» está activo) |
 | ⌘⌃S | Mostrar/ocultar la barra lateral |
 | ⌘1 … ⌘9 | Conectar a la conexión n.º 1 … 9 (menú **Conexiones**) |
@@ -73,7 +73,7 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
 
 ## Seguridad
 
-Ajustes en **tuissh → Ajustes…** (⌘,). Usan LocalAuthentication: Touch ID y,
+Ajustes en **gossh → Ajustes…** (⌘,). Usan LocalAuthentication: Touch ID y,
 si falla o el Mac no tiene sensor, Apple Watch o la contraseña de macOS. Las
 dos opciones vienen **desactivadas** y cambiarlas exige autenticarse:
 
@@ -141,16 +141,16 @@ go run .             # ejecutar (descarga libghostty-vt a la caché la 1ª vez)
 go tool mygo dev     # modo dev con recarga
 go vet ./... && go tool mygo vet .   # vet normal + ciclos de vida de la UI
 go test ./...        # store, sshx, settings, biometric, ui
-./build/dmg.sh       # → dist/darwin-arm64/{tuissh.app, tuissh *.dmg}
+./build/dmg.sh       # → dist/darwin-arm64/{gossh.app, gossh *.dmg}
 ```
 
 Los tests que tocan el llavero real están desactivados por defecto:
 
 ```bash
-TUISSH_KEYCHAIN_TEST=1 go test ./internal/store -run Keychain
+GOSSH_KEYCHAIN_TEST=1 go test ./internal/store -run Keychain
 ```
 
-(usa un servicio temporal y no toca la clave de `tuissh`).
+(usa un servicio temporal y no toca la clave de `gossh`).
 
 `mygo build` firma ad-hoc y genera el `.app` + `.dmg` con libghostty-vt
 incluida en el bundle (no se descarga nada en el Mac destino). Sin firma de

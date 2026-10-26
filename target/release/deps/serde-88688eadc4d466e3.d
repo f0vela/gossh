@@ -1,0 +1,14 @@
+/Users/fvelasquez/Developer/MacApps/ssh/target/release/deps/serde-88688eadc4d466e3.d: /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/fvelasquez/Developer/MacApps/ssh/target/release/build/serde-d24d52e12f144bda/out/private.rs
+
+/Users/fvelasquez/Developer/MacApps/ssh/target/release/deps/libserde-88688eadc4d466e3.rlib: /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/fvelasquez/Developer/MacApps/ssh/target/release/build/serde-d24d52e12f144bda/out/private.rs
+
+/Users/fvelasquez/Developer/MacApps/ssh/target/release/deps/libserde-88688eadc4d466e3.rmeta: /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs /Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs /Users/fvelasquez/Developer/MacApps/ssh/target/release/build/serde-d24d52e12f144bda/out/private.rs
+
+/Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/lib.rs:
+/Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/integer128.rs:
+/Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/mod.rs:
+/Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/de.rs:
+/Users/fvelasquez/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/serde-1.0.229/src/private/ser.rs:
+/Users/fvelasquez/Developer/MacApps/ssh/target/release/build/serde-d24d52e12f144bda/out/private.rs:
+
+# env-dep:OUT_DIR=/Users/fvelasquez/Developer/MacApps/ssh/target/release/build/serde-d24d52e12f144bda/out

@@ -42,28 +42,29 @@ func TestEncryptRoundtrip(t *testing.T) {
 }
 
 func TestBackupRoundtrip(t *testing.T) {
-	jsonStr, err := ExportBackup(sample(), "correct horse")
+	jsonStr, err := ExportBackup(Backup{Profiles: sample()}, "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
-	restored, err := ImportBackup([]byte(jsonStr), "correct horse")
+	got, err := ImportBackup([]byte(jsonStr), "correct horse")
 	if err != nil {
 		t.Fatal(err)
 	}
+	restored := got.Profiles
 	if len(restored) != 1 || restored[0].Password != "s3cr3t" || restored[0].Port != 2222 {
 		t.Fatalf("bad restore: %+v", restored)
 	}
 }
 
 func TestBackupWrongPassphrase(t *testing.T) {
-	jsonStr, _ := ExportBackup(sample(), "correct-passphrase")
+	jsonStr, _ := ExportBackup(Backup{Profiles: sample()}, "correct-passphrase")
 	if _, err := ImportBackup([]byte(jsonStr), "incorrect-passphrase"); err == nil {
 		t.Fatal("wrong passphrase must fail")
 	}
 }
 
 func TestBackupShortPassphrase(t *testing.T) {
-	if _, err := ExportBackup(sample(), "short"); err == nil {
+	if _, err := ExportBackup(Backup{Profiles: sample()}, "short"); err == nil {
 		t.Fatal("short passphrase must be rejected")
 	}
 }
@@ -85,13 +86,13 @@ func TestBackupV1EnvelopeStillImports(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if restored[0].Password != "s3cr3t" {
+	if len(restored.Profiles) != 1 || restored.Profiles[0].Password != "s3cr3t" {
 		t.Fatal("v1 import failed")
 	}
 }
 
 func TestBackupRejectsBadKDFCosts(t *testing.T) {
-	jsonStr, _ := ExportBackup(sample(), "correct horse")
+	jsonStr, _ := ExportBackup(Backup{Profiles: sample()}, "correct horse")
 	bad := strings.Replace(jsonStr, `"m_cost": 65536`, `"m_cost": 999999999`, 1)
 	if _, err := ImportBackup([]byte(bad), "correct horse"); err == nil {
 		t.Fatal("out-of-range KDF must fail")
@@ -124,5 +125,23 @@ func TestLoadSnippetsMissingFile(t *testing.T) {
 	got, err := s.LoadSnippets()
 	if err != nil || len(got) != 0 {
 		t.Fatalf("want no snippets and no error, got %v, %v", got, err)
+	}
+}
+
+func TestBackupCarriesSnippets(t *testing.T) {
+	in := Backup{Profiles: sample(), Snippets: []Snippet{{Name: "logs", Text: "tail -f /var/log/syslog", Enter: true}}}
+	jsonStr, err := ExportBackup(in, "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := ImportBackup([]byte(jsonStr), "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Snippets) != 1 || got.Snippets[0] != in.Snippets[0] || len(got.Profiles) != 1 {
+		t.Fatalf("bad restore: %+v", got)
+	}
+	if merged := AppendNewSnippets(in.Snippets, got.Snippets); len(merged) != 1 {
+		t.Fatalf("duplicates must be skipped, got %d", len(merged))
 	}
 }

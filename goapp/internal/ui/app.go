@@ -18,13 +18,13 @@ import (
 	"github.com/egoist/mygo/transfer"
 	"github.com/egoist/mygo/ui"
 
-	"tuissh-go/internal/biometric"
-	"tuissh-go/internal/settings"
-	"tuissh-go/internal/sshx"
-	"tuissh-go/internal/store"
+	"gossh-go/internal/biometric"
+	"gossh-go/internal/settings"
+	"gossh-go/internal/sshx"
+	"gossh-go/internal/store"
 )
 
-const appTitle = "tuissh"
+const appTitle = "gossh"
 
 type app struct {
 	win      *mygo.Window
@@ -342,7 +342,7 @@ func (a *app) guard(reason string, fn func()) {
 }
 
 func (a *app) unlock() {
-	a.authenticate("Desbloquear tuissh", func() {
+	a.authenticate("Desbloquear gossh", func() {
 		a.locked = false
 		if a.profiles == nil {
 			a.loadProfiles()
@@ -365,7 +365,7 @@ func (a *app) lock() {
 // changeSetting applies a settings change after authenticating, so a
 // passer-by at an unlocked Mac cannot switch the protection off.
 func (a *app) changeSetting(apply func(*settings.Settings)) {
-	a.authenticate("Cambiar los ajustes de seguridad de tuissh", func() {
+	a.authenticate("Cambiar los ajustes de seguridad de gossh", func() {
 		next := a.cfg
 		apply(&next)
 		if a.cfgStore == nil {
@@ -417,7 +417,7 @@ func (a *app) menu() *mygo.Menu {
 					a.toggleSidebar()
 				}
 			}},
-			{Label: "Bloquear tuissh", Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) { a.lock() }},
+			{Label: "Bloquear gossh", Accelerator: "CmdOrCtrl+L", Click: func(*mygo.MenuItem, *mygo.Window) { a.lock() }},
 			mygo.Separator(),
 			{Role: mygo.RoleServices},
 			mygo.Separator(),
@@ -514,7 +514,7 @@ func (a *app) lockView(c *ui.Context) {
 	t := c.Theme()
 	ui.Column(c).Fill().Center().Gap(10).DragWindow().Children(func() {
 		ui.Icon(c, iconLock).Size(44, 44).TextColor(t.TextMuted)
-		ui.Text(c, "tuissh está bloqueado").Bold().FontSize(17)
+		ui.Text(c, "gossh está bloqueado").Bold().FontSize(17)
 		ui.Text(c, "Usa "+a.authKind+" para ver tus conexiones.").TextColor(t.TextMuted)
 		ui.Spacer(c).Height(6)
 		if ui.PrimaryButton(c, "Desbloquear").Disabled(a.authBusy).Clicked() {
@@ -1628,7 +1628,7 @@ func (a *app) importBackup() {
 	a.dialogBusy = true
 	go func() {
 		paths, err := mygo.Dialog.Open(mygo.OpenDialogOptions{
-			Parent: a.win, Title: "Backup tuissh",
+			Parent: a.win, Title: "Backup gossh",
 			Filters: []mygo.FileFilter{{Name: "Backup", Extensions: []string{"json"}}},
 		})
 		var data []byte
@@ -1658,7 +1658,7 @@ func readBackupFile(path string) ([]byte, error) {
 		return nil, fmt.Errorf("Error leyendo: %w", err)
 	}
 	if st.Size() > store.MaxBackupFileSize {
-		return nil, fmt.Errorf("El archivo es demasiado grande para ser un backup de tuissh")
+		return nil, fmt.Errorf("El archivo es demasiado grande para ser un backup de gossh")
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -1677,13 +1677,16 @@ func (a *app) finishBackup() {
 			return
 		}
 		a.dialogBusy = true
-		profiles, pass := append([]store.ConnectionProfile(nil), a.profiles...), a.bkPass
+		bk, pass := store.Backup{
+			Profiles: append([]store.ConnectionProfile(nil), a.profiles...),
+			Snippets: append([]store.Snippet(nil), a.snippets...),
+		}, a.bkPass
 		go func() { // Argon2 and the save dialog both block: off the UI thread
-			jsonStr, err := store.ExportBackup(profiles, pass)
+			jsonStr, err := store.ExportBackup(bk, pass)
 			var path string
 			if err == nil {
 				path, err = mygo.Dialog.Save(mygo.SaveDialogOptions{
-					Parent: a.win, Title: "Exportar backup", DefaultPath: "tuissh-backup.json",
+					Parent: a.win, Title: "Exportar backup", DefaultPath: "gossh-backup.json",
 				})
 			}
 			if err == nil && path != "" {
@@ -1709,15 +1712,29 @@ func (a *app) finishBackup() {
 		a.bkErr = err.Error()
 		return
 	}
-	added, skipped := store.MergeImported(a.profiles, imported)
-	a.profiles = store.AppendNew(a.profiles, imported)
-	if err := a.st.SaveProfiles(a.profiles); err != nil {
+	added, skipped := store.MergeImported(a.profiles, imported.Profiles)
+	profiles := store.AppendNew(a.profiles, imported.Profiles)
+	snippets := store.AppendNewSnippets(a.snippets, imported.Snippets)
+	snAdded := len(snippets) - len(a.snippets)
+	if err := a.st.SaveProfiles(profiles); err != nil {
 		a.bkErr = "Error guardando: " + err.Error()
 		return
 	}
+	a.profiles = profiles
+	if snAdded > 0 {
+		if err := a.st.SaveSnippets(snippets); err != nil {
+			a.bkErr = "Error guardando snippets: " + err.Error()
+			return
+		}
+		a.snippets = snippets
+	}
 	a.bkOpen = false
 	a.refreshMenu()
-	a.notify(noteSuccess, fmt.Sprintf("%d importadas, %d duplicadas omitidas", added, skipped))
+	msg := fmt.Sprintf("%d importadas, %d duplicadas omitidas", added, skipped)
+	if len(imported.Snippets) > 0 {
+		msg += fmt.Sprintf(" · %d snippets nuevos", snAdded)
+	}
+	a.notify(noteSuccess, msg)
 }
 
 // ---- snippets ----

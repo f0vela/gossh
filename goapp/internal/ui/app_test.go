@@ -5,8 +5,8 @@ import (
 	"testing"
 	"time"
 
-	"tuissh-go/internal/settings"
-	"tuissh-go/internal/store"
+	"gossh-go/internal/settings"
+	"gossh-go/internal/store"
 )
 
 func TestWindowTitleSanitizesRemote(t *testing.T) {

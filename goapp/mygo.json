@@ -1,6 +1,6 @@
 {
-  "name": "tuissh",
-  "identifier": "com.tuissh.go",
-  "version": "0.6.0",
+  "name": "gossh",
+  "identifier": "com.gossh.app",
+  "version": "0.7.2",
   "macos": { "minimumSystemVersion": "13.0" }
 }

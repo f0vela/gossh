@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 
-	"tuissh-go/internal/store"
+	"gossh-go/internal/store"
 )
 
 // Prompt asks the user one keyboard-interactive question (an OTP code, a

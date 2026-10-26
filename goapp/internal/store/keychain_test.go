@@ -9,12 +9,12 @@ import (
 )
 
 // Touches the real login Keychain (with a throwaway service), so it only
-// runs on request: TUISSH_KEYCHAIN_TEST=1 go test ./internal/store -run Keychain
+// runs on request: GOSSH_KEYCHAIN_TEST=1 go test ./internal/store -run Keychain
 func TestKeychainLegacyMigration(t *testing.T) {
-	if os.Getenv("TUISSH_KEYCHAIN_TEST") == "" {
-		t.Skip("set TUISSH_KEYCHAIN_TEST=1 to run against the login Keychain")
+	if os.Getenv("GOSSH_KEYCHAIN_TEST") == "" {
+		t.Skip("set GOSSH_KEYCHAIN_TEST=1 to run against the login Keychain")
 	}
-	const svc = "tuissh-migration-test"
+	const svc = "gossh-migration-test"
 	cleanup := func() { _ = exec.Command("security", "delete-generic-password", "-s", svc, "-a", KeyringUser).Run() }
 	cleanup()
 	defer cleanup()

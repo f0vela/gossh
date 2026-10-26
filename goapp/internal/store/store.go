@@ -1,6 +1,6 @@
 // Package store manages SSH connection profiles: on-disk AES-256-GCM
 // encrypted storage, master key in macOS Keychain, and passphrase-protected
-// backup export/import fully compatible with the Rust tuissh format.
+// backup export/import fully compatible with the Rust gossh format.
 package store
 
 import (
@@ -24,12 +24,13 @@ import (
 )
 
 const (
-	KeyringService = "tuissh"
+	KeyringService = "gossh"
 	KeyringUser    = "data-key"
 	DataFile       = "profiles.enc"
 
-	BackupFormat             = "tuissh-backup"
-	BackupVersion            = 2
+	BackupFormat             = "gossh-backup"
+	legacyBackupFormat       = "tuissh-backup" // backups made before the rename
+	BackupVersion            = 3
 	backupMinVersion         = 1
 	MinBackupPassphraseChars = 12
 	backupSaltLen            = 16
@@ -100,7 +101,7 @@ func New() (*SecureStore, error) {
 	if err != nil {
 		return nil, err
 	}
-	base := filepath.Join(home, "Library", "Application Support", "tuissh")
+	base := filepath.Join(home, "Library", "Application Support", "gossh")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return nil, err
 	}
@@ -279,8 +280,16 @@ type BackupEnvelope struct {
 	ProfilesCount int    `json:"profiles_count,omitempty"`
 }
 
-// ExportBackup encrypts profiles with a passphrase-derived key.
-func ExportBackup(profiles []ConnectionProfile, passphrase string) (string, error) {
+// Backup is what a backup file carries. Versions 1–2 held only a profile
+// array; version 3 wraps profiles and snippets in an object.
+type Backup struct {
+	Profiles []ConnectionProfile `json:"profiles"`
+	Snippets []Snippet           `json:"snippets,omitempty"`
+}
+
+// ExportBackup encrypts profiles and snippets with a passphrase-derived key.
+func ExportBackup(b Backup, passphrase string) (string, error) {
+	profiles := b.Profiles
 	if len([]rune(passphrase)) < MinBackupPassphraseChars {
 		return "", fmt.Errorf("la contraseña del backup debe tener al menos %d caracteres",
 			MinBackupPassphraseChars)
@@ -291,7 +300,7 @@ func ExportBackup(profiles []ConnectionProfile, passphrase string) (string, erro
 	}
 	key := argon2.IDKey([]byte(passphrase), salt, BackupKDF.TCost,
 		BackupKDF.MCost, uint8(BackupKDF.PCost), 32)
-	plain, err := json.Marshal(profiles)
+	plain, err := json.Marshal(b)
 	if err != nil {
 		return "", err
 	}
@@ -313,45 +322,53 @@ func ExportBackup(profiles []ConnectionProfile, passphrase string) (string, erro
 }
 
 // ImportBackup decrypts a backup produced by ExportBackup (Go or Rust).
-func ImportBackup(jsonData []byte, passphrase string) ([]ConnectionProfile, error) {
+func ImportBackup(jsonData []byte, passphrase string) (Backup, error) {
+	var none Backup
 	var env BackupEnvelope
 	if err := json.Unmarshal(jsonData, &env); err != nil {
-		return nil, fmt.Errorf("el archivo no es un backup válido de tuissh")
+		return none, fmt.Errorf("el archivo no es un backup válido de gossh")
 	}
-	if env.Format != BackupFormat {
-		return nil, fmt.Errorf("formato de backup no reconocido: %s", env.Format)
+	if env.Format != BackupFormat && env.Format != legacyBackupFormat {
+		return none, fmt.Errorf("formato de backup no reconocido: %s", env.Format)
 	}
 	if env.Version < backupMinVersion || env.Version > BackupVersion {
-		return nil, fmt.Errorf("versión de backup no soportada: %d", env.Version)
+		return none, fmt.Errorf("versión de backup no soportada: %d", env.Version)
 	}
 	kdf := legacyKDF
 	if env.Version >= 2 {
 		kdf = KDFParams{MCost: env.MCost, TCost: env.TCost, PCost: env.PCost}
 		if kdf.MCost == 0 || kdf.TCost == 0 || kdf.PCost == 0 ||
 			kdf.MCost > maxKDFMCost || kdf.TCost > maxKDFTCost || kdf.PCost > maxKDFPCost {
-			return nil, fmt.Errorf("parámetros de derivación de clave fuera de rango en el backup")
+			return none, fmt.Errorf("parámetros de derivación de clave fuera de rango en el backup")
 		}
 	}
 	salt, err := base64.StdEncoding.DecodeString(env.Salt)
 	if err != nil || len(salt) != backupSaltLen {
-		return nil, fmt.Errorf("salt inválido en el backup")
+		return none, fmt.Errorf("salt inválido en el backup")
 	}
 	blob, err := base64.StdEncoding.DecodeString(env.Data)
 	if err != nil {
-		return nil, fmt.Errorf("datos cifrados inválidos en el backup")
+		return none, fmt.Errorf("datos cifrados inválidos en el backup")
 	}
 	key := argon2.IDKey([]byte(passphrase), salt, kdf.TCost, kdf.MCost, uint8(kdf.PCost), 32)
 	var keyArr [32]byte
 	copy(keyArr[:], key)
 	plain, err := decrypt(blob, keyArr)
 	if err != nil {
-		return nil, fmt.Errorf("contraseña incorrecta o backup corrupto")
+		return none, fmt.Errorf("contraseña incorrecta o backup corrupto")
 	}
-	var profiles []ConnectionProfile
-	if err := json.Unmarshal(plain, &profiles); err != nil {
-		return nil, fmt.Errorf("contenido del backup ilegible")
+	var out Backup
+	if trimmed := strings.TrimSpace(string(plain)); strings.HasPrefix(trimmed, "[") {
+		// v1/v2: a bare profile array
+		if err := json.Unmarshal(plain, &out.Profiles); err != nil {
+			return none, fmt.Errorf("contenido del backup ilegible")
+		}
+		return out, nil
 	}
-	return profiles, nil
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return none, fmt.Errorf("contenido del backup ilegible")
+	}
+	return out, nil
 }
 
 // AppendNew returns existing plus the imported profiles that are not
@@ -366,6 +383,23 @@ func AppendNew(existing, imported []ConnectionProfile) []ConnectionProfile {
 		if !seen[dupKey(p)] {
 			seen[dupKey(p)] = true
 			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// AppendNewSnippets returns existing plus the imported snippets that are
+// not duplicates (same name and text).
+func AppendNewSnippets(existing, imported []Snippet) []Snippet {
+	seen := map[string]bool{}
+	for _, sn := range existing {
+		seen[sn.Name+"\x00"+sn.Text] = true
+	}
+	out := append([]Snippet{}, existing...)
+	for _, sn := range imported {
+		if k := sn.Name + "\x00" + sn.Text; !seen[k] {
+			seen[k] = true
+			out = append(out, sn)
 		}
 	}
 	return out

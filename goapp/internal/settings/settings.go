@@ -27,7 +27,7 @@ func New() (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(home, "Library", "Application Support", "tuissh")
+	dir := filepath.Join(home, "Library", "Application Support", "gossh")
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
