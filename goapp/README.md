@@ -1,6 +1,6 @@
 # gossh-go
 
-Port a Go de la app tuissh (Rust TUI), ahora gossh. App de escritorio nativa para macOS
+App gossh (antes tuissh). App de escritorio nativa para macOS
 hecha con [MyGo](https://mygo.egoist.dev): barra lateral con las conexiones y,
 en una tarjeta redondeada, la terminal SSH embebida, emulada con
 **libghostty-vt** (la librería de terminal de Ghostty, vía `plugins/terminal`).
@@ -15,8 +15,8 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
   libghostty-vt, scrollback, selección, copy/paste, zoom.
 - **SSH/SFTP**: `golang.org/x/crypto/ssh` + `github.com/pkg/sftp`.
 - **Keychain**: API nativa de macOS vía `mygo.Secrets` (servicio `gossh`,
-  cuenta `data-key`, **el mismo que usa la app Rust** → comparte
-  `profiles.enc`). La clave que dejó la app Rust se lee una vez con el CLI
+  cuenta `data-key`, **el mismo que usa `gossh` CLI**, la versión de terminal → comparten
+  `profiles.enc`). La clave que dejó una versión anterior se lee una vez con el CLI
   `security` y se migra (ver [Seguridad](#seguridad)).
 - **Touch ID**: `LocalAuthentication` vía `purego` (puente Objective-C, sin cgo).
 
@@ -37,8 +37,8 @@ Documentación técnica detallada: [`docs/DOCUMENTACION_TECNICA.md`](docs/DOCUME
 - SFTP: subir archivo (pide confirmación si va a sobrescribir), abrir/editar/
   guardar archivo remoto (límite 2 MiB, solo UTF-8, guardado atómico).
 - Backup export/import cifrado con contraseña (Argon2id 64 MiB/3 pasadas +
-  AES-256-GCM), **formato idéntico al Rust** (`gossh-backup` v1/v2): los
-  backups exportados por la TUI se importan aquí directamente.
+  AES-256-GCM), **mismo formato que `gossh` CLI** (`gossh-backup` v1–v3): los
+  backups exportados por la versión de terminal se importan aquí directamente.
 - Almacén cifrado `profiles.enc` en
   `~/Library/Application Support/gossh/` (0600).
 
@@ -93,7 +93,7 @@ Resumen de las defensas (detalle en la documentación técnica):
 - **Keychain**: solo se crea una clave nueva si el ítem no existe; cualquier
   otro fallo (keychain bloqueado, acceso denegado) se devuelve como error y
   nunca borra la clave del almacén existente. La clave que dejó el CLI
-  `security`/la app Rust se lee una vez y se recrea con la app como dueña, de
+  `security` se lee una vez y se recrea con la app como dueña, de
   modo que el llavero ya no pide la contraseña en cada arranque.
 - **Host keys**: `known_hosts` se crea (0600) si falta; cambio de llave =
   rechazo duro.
@@ -118,7 +118,7 @@ Resumen de las defensas (detalle en la documentación técnica):
   del llavero una vez por versión nueva. Una identidad de firma estable
   (`macos.signingIdentity` en `mygo.json`) lo evita.
 - Las contraseñas guardadas van en texto plano **dentro** de `profiles.enc`
-  (formato compartido con la app Rust; el archivo sí va cifrado).
+  (formato compartido con `gossh` CLI; el archivo sí va cifrado).
 - Si Touch ID falla de forma inesperada pese a un dedo válido, hay que revisar
   la lectura del resultado en `internal/biometric`.
 

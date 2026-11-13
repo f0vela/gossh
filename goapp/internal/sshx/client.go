@@ -1,6 +1,6 @@
 // Package sshx wraps golang.org/x/crypto/ssh: connect, authenticate,
 // host-key verification against ~/.ssh/known_hosts, interactive PTY shell
-// and SFTP file operations. Mirrors the Rust ssh.rs worker contract.
+// and SFTP file operations.
 package sshx
 
 import (

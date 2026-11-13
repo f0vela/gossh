@@ -1,0 +1,458 @@
+// Package store manages SSH connection profiles: on-disk AES-256-GCM
+// encrypted storage, master key in the system keychain, and passphrase-protected
+// backup export/import fully compatible with the gossh desktop app.
+package store
+
+import (
+	"crypto/aes"
+	"crypto/cipher"
+	"crypto/rand"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"golang.org/x/crypto/argon2"
+
+	"gossh-cli/internal/paths"
+)
+
+const (
+	KeyringUser = "data-key"
+	DataFile    = "profiles.enc"
+
+	BackupFormat             = "gossh-backup"
+	legacyBackupFormat       = "tuissh-backup" // backups made before the rename
+	BackupVersion            = 3
+	backupMinVersion         = 1
+	MinBackupPassphraseChars = 12
+	backupSaltLen            = 16
+
+	// MaxBackupFileSize bounds a backup read from disk.
+	MaxBackupFileSize = 16 << 20
+)
+
+// KeyringService is the keychain service holding the master key. It is shared
+// with the gossh desktop app; GOSSH_KEYRING_SERVICE overrides it (tests).
+var KeyringService = func() string {
+	if v := os.Getenv("GOSSH_KEYRING_SERVICE"); v != "" {
+		return v
+	}
+	return "gossh"
+}()
+
+// KDFParams are Argon2id costs stored in the backup so they can change later.
+type KDFParams struct {
+	MCost uint32
+	TCost uint32
+	PCost uint32
+}
+
+var (
+	// Current costs for new backups: 64 MiB, 3 passes.
+	BackupKDF = KDFParams{MCost: 64 * 1024, TCost: 3, PCost: 1}
+	// Costs used by v1 backups (argon2 crate defaults).
+	legacyKDF = KDFParams{MCost: 19 * 1024, TCost: 2, PCost: 1}
+)
+
+const (
+	maxKDFMCost = 512 * 1024
+	maxKDFTCost = 10
+	maxKDFPCost = 8
+)
+
+// AuthMethod mirrors the Rust enum (serde lowercase).
+type AuthMethod string
+
+const (
+	AuthPassword    AuthMethod = "password"
+	AuthKey         AuthMethod = "key"
+	AuthBoth        AuthMethod = "both"
+	AuthInteractive AuthMethod = "interactive"
+)
+
+// ConnectionProfile is serialized identically to the Rust ConnectionProfile,
+// so encrypted stores and backups are interchangeable.
+type ConnectionProfile struct {
+	Name           string     `json:"name"`
+	Host           string     `json:"host"`
+	Port           uint16     `json:"port"`
+	User           string     `json:"user"`
+	AuthMethod     AuthMethod `json:"auth_method"`
+	Password       string     `json:"password"`
+	PrivateKeyPath string     `json:"private_key_path"`
+	PrivateKeyPass string     `json:"private_key_pass"`
+}
+
+// LoadedProfiles is the result of opening the encrypted store.
+type LoadedProfiles struct {
+	Profiles []ConnectionProfile
+	// Set when the store existed but could not be decrypted and was moved aside.
+	Notice string
+}
+
+type SecureStore struct {
+	dataPath string
+}
+
+func New() (*SecureStore, error) {
+	base, err := paths.DataDir()
+	if err != nil {
+		return nil, err
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return nil, err
+	}
+	_ = os.Chmod(base, 0o700)
+	return &SecureStore{dataPath: filepath.Join(base, DataFile)}, nil
+}
+
+// WithDataPath creates a store backed by an explicit path (tests).
+func WithDataPath(path string) *SecureStore { return &SecureStore{dataPath: path} }
+
+func (s *SecureStore) LoadProfiles() (*LoadedProfiles, error) {
+	ciphertext, err := os.ReadFile(s.dataPath)
+	if errors.Is(err, os.ErrNotExist) {
+		return &LoadedProfiles{}, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("leyendo almacenamiento: %w", err)
+	}
+	key, err := s.getOrCreateKey()
+	if err != nil {
+		return nil, err
+	}
+	plain, err := decrypt(ciphertext, key)
+	if err != nil {
+		moved, berr := s.backupUnreadableStore()
+		if berr != nil {
+			return nil, berr
+		}
+		return &LoadedProfiles{Notice: fmt.Sprintf(
+			"No se pudieron descifrar tus perfiles guardados (¿cambió la clave del keychain '%s'?). "+
+				"El archivo NO se borró: quedó en %s. Si recuperas la clave, restáuralo como %s.",
+			KeyringService, moved, s.dataPath)}, nil
+	}
+	var profiles []ConnectionProfile
+	if err := json.Unmarshal(plain, &profiles); err != nil {
+		return nil, fmt.Errorf("parseando perfiles: %w", err)
+	}
+	return &LoadedProfiles{Profiles: profiles}, nil
+}
+
+func (s *SecureStore) SaveProfiles(profiles []ConnectionProfile) error {
+	key, err := s.getOrCreateKey()
+	if err != nil {
+		return err
+	}
+	plain, err := json.MarshalIndent(profiles, "", "  ")
+	if err != nil {
+		return err
+	}
+	enc, err := encrypt(plain, key)
+	if err != nil {
+		return err
+	}
+	tmp := strings.TrimSuffix(s.dataPath, ".enc") + ".enc.tmp"
+	if err := writePrivate(tmp, enc); err != nil {
+		return fmt.Errorf("guardando perfiles: %w", err)
+	}
+	return os.Rename(tmp, s.dataPath)
+}
+
+func (s *SecureStore) backupUnreadableStore() (string, error) {
+	moved := strings.TrimSuffix(s.dataPath, ".enc") +
+		fmt.Sprintf(".enc.unreadable.%d.bak", time.Now().Unix())
+	if err := os.Rename(s.dataPath, moved); err != nil {
+		return "", fmt.Errorf("no se pudo respaldar almacenamiento ilegible: %w", err)
+	}
+	return moved, nil
+}
+
+// getOrCreateKey returns the 32-byte master key from the system keychain
+// (service/account shared with the gossh desktop app). A key is only created
+// when none exists: any other failure (locked keychain, access denied by the
+// user) is returned, because replacing the entry would destroy the key of
+// the existing encrypted store.
+func (s *SecureStore) getOrCreateKey() ([32]byte, error) {
+	var zero [32]byte
+	raw, err := readKeychainKey(s.dataPath)
+	switch {
+	case err == nil:
+		key, derr := decodeKey(strings.TrimSpace(raw))
+		if derr == nil {
+			return key, nil
+		}
+		if st, statErr := os.Stat(s.dataPath); statErr == nil && st.Size() > 0 {
+			return zero, fmt.Errorf("clave keychain inválida y hay datos cifrados existentes en %s. "+
+				"Borra la entrada de keychain del servicio '%s' cuenta '%s' para regenerar",
+				s.dataPath, KeyringService, KeyringUser)
+		}
+		return s.storeNewKey()
+	case errors.Is(err, errKeyNotFound):
+		return s.storeNewKey()
+	}
+	return zero, fmt.Errorf("no se pudo leer la clave del keychain: %w", err)
+}
+
+var errKeyNotFound = errors.New("clave no encontrada en el keychain")
+
+// storeNewKey generates a key and stores it in the keychain.
+func (s *SecureStore) storeNewKey() ([32]byte, error) {
+	var key [32]byte
+	if _, err := rand.Read(key[:]); err != nil {
+		return key, err
+	}
+	encoded := base64.StdEncoding.EncodeToString(key[:])
+	if err := writeKeychainKey(s.dataPath, encoded); err != nil {
+		return key, fmt.Errorf("guardando clave en keychain: %w", err)
+	}
+	return key, nil
+}
+
+// BackupEnvelope is the portable passphrase-protected backup JSON.
+type BackupEnvelope struct {
+	Format        string `json:"format"`
+	Version       uint32 `json:"version"`
+	KDF           string `json:"kdf"`
+	Salt          string `json:"salt"`
+	Data          string `json:"data"`
+	MCost         uint32 `json:"m_cost,omitempty"`
+	TCost         uint32 `json:"t_cost,omitempty"`
+	PCost         uint32 `json:"p_cost,omitempty"`
+	CreatedAt     uint64 `json:"created_at,omitempty"`
+	ProfilesCount int    `json:"profiles_count,omitempty"`
+}
+
+// Backup is what a backup file carries. Versions 1–2 held only a profile
+// array; version 3 wraps profiles and snippets in an object.
+type Backup struct {
+	Profiles []ConnectionProfile `json:"profiles"`
+	Snippets []Snippet           `json:"snippets,omitempty"`
+}
+
+// ExportBackup encrypts profiles and snippets with a passphrase-derived key.
+func ExportBackup(b Backup, passphrase string) (string, error) {
+	profiles := b.Profiles
+	if len([]rune(passphrase)) < MinBackupPassphraseChars {
+		return "", fmt.Errorf("la contraseña del backup debe tener al menos %d caracteres",
+			MinBackupPassphraseChars)
+	}
+	salt := make([]byte, backupSaltLen)
+	if _, err := rand.Read(salt); err != nil {
+		return "", err
+	}
+	key := argon2.IDKey([]byte(passphrase), salt, BackupKDF.TCost,
+		BackupKDF.MCost, uint8(BackupKDF.PCost), 32)
+	plain, err := json.Marshal(b)
+	if err != nil {
+		return "", err
+	}
+	var keyArr [32]byte
+	copy(keyArr[:], key)
+	enc, err := encrypt(plain, keyArr)
+	if err != nil {
+		return "", err
+	}
+	env := BackupEnvelope{
+		Format: BackupFormat, Version: BackupVersion, KDF: "argon2id",
+		Salt:  base64.StdEncoding.EncodeToString(salt),
+		Data:  base64.StdEncoding.EncodeToString(enc),
+		MCost: BackupKDF.MCost, TCost: BackupKDF.TCost, PCost: BackupKDF.PCost,
+		CreatedAt: uint64(time.Now().Unix()), ProfilesCount: len(profiles),
+	}
+	out, err := json.MarshalIndent(&env, "", "  ")
+	return string(out), err
+}
+
+// ImportBackup decrypts a backup produced by ExportBackup (Go or Rust).
+func ImportBackup(jsonData []byte, passphrase string) (Backup, error) {
+	var none Backup
+	var env BackupEnvelope
+	if err := json.Unmarshal(jsonData, &env); err != nil {
+		return none, fmt.Errorf("el archivo no es un backup válido de gossh")
+	}
+	if env.Format != BackupFormat && env.Format != legacyBackupFormat {
+		return none, fmt.Errorf("formato de backup no reconocido: %s", env.Format)
+	}
+	if env.Version < backupMinVersion || env.Version > BackupVersion {
+		return none, fmt.Errorf("versión de backup no soportada: %d", env.Version)
+	}
+	kdf := legacyKDF
+	if env.Version >= 2 {
+		kdf = KDFParams{MCost: env.MCost, TCost: env.TCost, PCost: env.PCost}
+		if kdf.MCost == 0 || kdf.TCost == 0 || kdf.PCost == 0 ||
+			kdf.MCost > maxKDFMCost || kdf.TCost > maxKDFTCost || kdf.PCost > maxKDFPCost {
+			return none, fmt.Errorf("parámetros de derivación de clave fuera de rango en el backup")
+		}
+	}
+	salt, err := base64.StdEncoding.DecodeString(env.Salt)
+	if err != nil || len(salt) != backupSaltLen {
+		return none, fmt.Errorf("salt inválido en el backup")
+	}
+	blob, err := base64.StdEncoding.DecodeString(env.Data)
+	if err != nil {
+		return none, fmt.Errorf("datos cifrados inválidos en el backup")
+	}
+	key := argon2.IDKey([]byte(passphrase), salt, kdf.TCost, kdf.MCost, uint8(kdf.PCost), 32)
+	var keyArr [32]byte
+	copy(keyArr[:], key)
+	plain, err := decrypt(blob, keyArr)
+	if err != nil {
+		return none, fmt.Errorf("contraseña incorrecta o backup corrupto")
+	}
+	var out Backup
+	if trimmed := strings.TrimSpace(string(plain)); strings.HasPrefix(trimmed, "[") {
+		// v1/v2: a bare profile array
+		if err := json.Unmarshal(plain, &out.Profiles); err != nil {
+			return none, fmt.Errorf("contenido del backup ilegible")
+		}
+		return out, nil
+	}
+	if err := json.Unmarshal(plain, &out); err != nil {
+		return none, fmt.Errorf("contenido del backup ilegible")
+	}
+	return out, nil
+}
+
+// AppendNew returns existing plus the imported profiles that are not
+// duplicates (same name+host+port+user).
+func AppendNew(existing, imported []ConnectionProfile) []ConnectionProfile {
+	seen := map[string]bool{}
+	for _, p := range existing {
+		seen[dupKey(p)] = true
+	}
+	out := append([]ConnectionProfile{}, existing...)
+	for _, p := range imported {
+		if !seen[dupKey(p)] {
+			seen[dupKey(p)] = true
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// AppendNewSnippets returns existing plus the imported snippets that are
+// not duplicates (same name and text).
+func AppendNewSnippets(existing, imported []Snippet) []Snippet {
+	seen := map[string]bool{}
+	for _, sn := range existing {
+		seen[sn.Name+"\x00"+sn.Text] = true
+	}
+	out := append([]Snippet{}, existing...)
+	for _, sn := range imported {
+		if k := sn.Name + "\x00" + sn.Text; !seen[k] {
+			seen[k] = true
+			out = append(out, sn)
+		}
+	}
+	return out
+}
+
+// MergeImported reports how many imported profiles AppendNew would add and
+// how many it would skip as duplicates.
+func MergeImported(existing, imported []ConnectionProfile) (added int, skipped int) {
+	added = len(AppendNew(existing, imported)) - len(existing)
+	return added, len(imported) - added
+}
+
+func dupKey(p ConnectionProfile) string {
+	return fmt.Sprintf("%s|%s|%d|%s", p.Name, p.Host, p.Port, p.User)
+}
+
+// WritePrivate writes data owner-only (0600) from the start.
+func WritePrivate(path string, data []byte) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0o600)
+}
+
+func writePrivate(path string, data []byte) error { return WritePrivate(path, data) }
+
+func encrypt(data []byte, key [32]byte) ([]byte, error) {
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	nonce := make([]byte, 12)
+	if _, err := rand.Read(nonce); err != nil {
+		return nil, err
+	}
+	return gcm.Seal(nonce, nonce, data, nil), nil
+}
+
+func decrypt(data []byte, key [32]byte) ([]byte, error) {
+	if len(data) < 12 {
+		return nil, fmt.Errorf("contenido cifrado inválido")
+	}
+	block, err := aes.NewCipher(key[:])
+	if err != nil {
+		return nil, err
+	}
+	gcm, err := cipher.NewGCM(block)
+	if err != nil {
+		return nil, err
+	}
+	return gcm.Open(nil, data[:12], data[12:], nil)
+}
+
+// decodeKey accepts the same encodings the Rust version tolerates.
+func decodeKey(encoded string) ([32]byte, error) {
+	var zero [32]byte
+	s := strings.TrimSpace(encoded)
+	try := func(b []byte) ([32]byte, bool) {
+		if len(b) != 32 {
+			return zero, false
+		}
+		var k [32]byte
+		copy(k[:], b)
+		return k, true
+	}
+	if b, err := base64.StdEncoding.DecodeString(s); err == nil {
+		if k, ok := try(b); ok {
+			return k, nil
+		}
+	}
+	if b, err := base64.URLEncoding.DecodeString(s); err == nil {
+		if k, ok := try(b); ok {
+			return k, nil
+		}
+	}
+	if b, err := base64.RawURLEncoding.DecodeString(s); err == nil {
+		if k, ok := try(b); ok {
+			return k, nil
+		}
+	}
+	hexed := strings.TrimPrefix(s, "0x")
+	if len(hexed) == 64 {
+		if b, err := hex.DecodeString(hexed); err == nil {
+			if k, ok := try(b); ok {
+				return k, nil
+			}
+		}
+	}
+	if len(s) == 32 {
+		if k, ok := try([]byte(s)); ok {
+			return k, nil
+		}
+	}
+	return zero, fmt.Errorf("clave keychain inválida")
+}

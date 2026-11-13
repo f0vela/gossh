@@ -20,7 +20,7 @@ import (
 type Prompt func(instruction, question string, echo bool) (answer string, ok bool)
 
 // authMethods builds the ssh.AuthMethod list for the profile, falling back
-// across methods like the Rust version does.
+// across methods.
 func authMethods(p store.ConnectionProfile, prompt Prompt) ([]ssh.AuthMethod, error) {
 	hasPass := strings.TrimSpace(p.Password) != ""
 	hasKey := strings.TrimSpace(p.PrivateKeyPath) != ""

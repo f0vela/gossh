@@ -1,6 +1,6 @@
 // Package store manages SSH connection profiles: on-disk AES-256-GCM
 // encrypted storage, master key in macOS Keychain, and passphrase-protected
-// backup export/import fully compatible with the Rust gossh format.
+// backup export/import shared with the gossh CLI.
 package store
 
 import (
@@ -62,7 +62,7 @@ const (
 	maxKDFPCost = 8
 )
 
-// AuthMethod mirrors the Rust enum (serde lowercase).
+// AuthMethod is stored lowercase in the JSON.
 type AuthMethod string
 
 const (
@@ -72,8 +72,8 @@ const (
 	AuthInteractive AuthMethod = "interactive"
 )
 
-// ConnectionProfile is serialized identically to the Rust ConnectionProfile,
-// so encrypted stores and backups are interchangeable.
+// ConnectionProfile is the shared on-disk format, so encrypted stores and
+// backups are interchangeable with the gossh CLI.
 type ConnectionProfile struct {
 	Name           string     `json:"name"`
 	Host           string     `json:"host"`
@@ -172,7 +172,7 @@ func (s *SecureStore) backupUnreadableStore() (string, error) {
 }
 
 // getOrCreateKey returns the 32-byte master key from the macOS Keychain
-// (service/account shared with the Rust app). A key is only created when
+// (service/account shared with the gossh CLI). A key is only created when
 // none exists: any other failure (locked keychain, access denied by the
 // user) is returned, because replacing the entry would destroy the key of
 // the existing encrypted store.
@@ -201,7 +201,7 @@ var errKeyNotFound = errors.New("clave no encontrada en el keychain")
 
 // readKeychainKey reads the key through the native Keychain API.
 //
-// A key made by the Rust app, or by an older build through the `security`
+// A key made by the gossh CLI, or by an older build through the `security`
 // CLI, is not found there. It is read once with the CLI (which that item
 // trusts, so silently) and recreated natively: the Keychain trusts the app
 // that created an item, so later launches read it without asking for the
@@ -321,7 +321,7 @@ func ExportBackup(b Backup, passphrase string) (string, error) {
 	return string(out), err
 }
 
-// ImportBackup decrypts a backup produced by ExportBackup (Go or Rust).
+// ImportBackup decrypts a backup produced by ExportBackup (goapp or the CLI).
 func ImportBackup(jsonData []byte, passphrase string) (Backup, error) {
 	var none Backup
 	var env BackupEnvelope
@@ -465,7 +465,7 @@ func decrypt(data []byte, key [32]byte) ([]byte, error) {
 	return gcm.Open(nil, data[:12], data[12:], nil)
 }
 
-// decodeKey accepts the same encodings the Rust version tolerates.
+// decodeKey accepts the encodings older builds produced.
 func decodeKey(encoded string) ([32]byte, error) {
 	var zero [32]byte
 	s := strings.TrimSpace(encoded)

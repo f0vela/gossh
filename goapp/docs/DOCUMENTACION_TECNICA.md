@@ -2,7 +2,7 @@
 
 Versión Go (macOS) de gossh, hecha con MyGo. Complementa a
 [`../README.md`](../README.md). El formato de datos (perfiles cifrados y
-backups) es **idéntico al de la versión Rust**: ambas apps comparten
+backups) es **el mismo que usa `gossh` CLI (la versión de terminal)**: ambas apps comparten
 `profiles.enc` y los backups son intercambiables.
 
 ## 1. Visión general
@@ -161,7 +161,7 @@ autenticación falla con un error claro.
   `data-key`) mediante `mygo.Secrets` (API nativa). Reglas:
   - Solo se genera una clave nueva si el ítem **no existe**
     (`ErrSecretNotFound` o exit 44 del CLI). Cualquier otro error se devuelve.
-  - Un ítem hecho por la app Rust o por el CLI `security` no se ve con la API
+  - Un ítem hecho por `gossh` CLI o por el CLI `security` no se ve con la API
     nativa: se lee una vez con el CLI (que ese ítem sí acepta), se borra y se
     **recrea con la app como propietaria** (`migrateLegacyKey`). Si la
     escritura nativa fallara tras borrar, la clave se restaura con el CLI para
@@ -262,7 +262,7 @@ vez por versión nueva. Poner una identidad estable en
   exige entitlements de un perfil de Apple.
 - Un proceso con el usuario puede editar `settings.json`.
 - Las contraseñas guardadas van en claro dentro del JSON cifrado de
-  `profiles.enc` (compatibilidad con la app Rust).
+  `profiles.enc` (compatibilidad con `gossh` CLI).
 - Las subidas pisan archivos solo tras confirmar; la edición remota exige
   texto UTF-8 de hasta 2 MiB.
 - El fondo de la barra lateral usa el color de la paleta, no el material
